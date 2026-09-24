@@ -56,8 +56,6 @@
   var COLOR = {
     pipe: '#3ecf5a',
     pipeDark: '#2ba344',
-    bird: '#ffd23e',
-    birdWing: '#ff9f1c',
     text: '#ffffff',
     panel: 'rgba(0, 0, 0, 0.45)'
   };
@@ -225,6 +223,10 @@
       else if (name === 'score') tone(880, 0.1, 'sine');
       else if (name === 'milestone') { tone(660, 0.1, 'sine'); tone(990, 0.14, 'sine', 0.1); }
       else if (name === 'die') tone(280, 0.4, 'sawtooth', 0, 70);
+      else if (name === 'coin') tone(1046, 0.09, 'sine');
+      else if (name === 'shield') { tone(392, 0.12, 'triangle'); tone(587, 0.16, 'triangle', 0.1); }
+      else if (name === 'revive') { tone(523, 0.1, 'sine'); tone(784, 0.18, 'sine', 0.1); }
+      else if (name === 'rain') { tone(660, 0.1, 'sine'); tone(880, 0.1, 'sine', 0.1); tone(1046, 0.16, 'sine', 0.2); tone(1318, 0.2, 'sine', 0.32); }
       else if (name === 'record') { tone(523, 0.12, 'sine'); tone(659, 0.12, 'sine', 0.12); tone(784, 0.2, 'sine', 0.24); }
     } catch (e) {}
   }
@@ -252,6 +254,29 @@
   var bird = { y: H * 0.4, vy: 0, wing: 0, squash: 0 };
   var pipes = []; // { x, gapY, gap } gapY 为缝隙中心
   var lines = []; // 点按气流速度线 { x, y, vx, vy, life }
+  var items = [];     // 道具 { type:'coin'|'shield', x, y, r, phase }
+  var shieldOn = false; // 护盾：抵挡一次碰撞
+  var invT = 0;         // 护盾抵挡后的短暂无敌（防止卡在管道里连死）
+  var coins = parseInt(loadVal('ttn_coins'), 10) || 0; // 金币总量（持久保存）
+  var revives = 0; // 当局已复活次数（决定复活价格）
+  var floats = []; // 得分飘字 { x, y, t, text, color }
+  var rainTimer = 20 + Math.random() * 20; // 距下次金币雨的秒数
+  var rainWarn = 0; // 金币雨预告剩余秒数
+  var rainT = 0;    // 金币雨进行中剩余秒数
+  var rainSpawn = 0; // 金币雨刷金币计时
+  var rainEndWarned = false; // 是否已提示金币雨即将结束
+
+  // 皮肤：按历史最高分解锁，need 为所需分数
+  var SKINS = [
+    { name: '小黄', body: '#ffd23e', wing: '#ff9f1c', need: 0 },
+    { name: '小蓝', body: '#4ecdc4', wing: '#2a9d8f', need: 10 },
+    { name: '小粉', body: '#ff8fab', wing: '#e0567f', need: 20 },
+    { name: '小紫', body: '#a78bfa', wing: '#7c5cd6', need: 30 },
+    { name: '夜影', body: '#5a6472', wing: '#39414e', need: 50 }
+  ];
+  var skinIdx = parseInt(loadVal('ttn_skin'), 10);
+  if (!(skinIdx >= 0 && skinIdx < SKINS.length)) skinIdx = 0;
+  function skinUnlocked(i) { return best >= SKINS[i].need; }
 
   // 难度曲线：随分数渐进提升，25 分封顶；三档难度改变基础速度、缝隙与爬升率
   var DIFF_NAMES = ['简单', '中等', '困难'];
@@ -301,6 +326,14 @@
     pipes = [];
     lines = [];
     confetti = [];
+    items = [];
+    shieldOn = false;
+    invT = 0;
+    revives = 0;
+    floats = [];
+    rainTimer = 20 + Math.random() * 20;
+    rainWarn = 0;
+    rainT = 0;
     score = 0;
     introT = 0.9;
     paused = false;
@@ -310,12 +343,38 @@
     state = STATE_PLAYING;
   }
 
+  // ---------- 复活 ----------
+  function revivePrice() { return 5 + revives * 5; }
+  function revive() {
+    if (coins < revivePrice()) return;
+    coins -= revivePrice();
+    saveVal('ttn_coins', coins);
+    revives++;
+    state = STATE_PLAYING;
+    paused = false;
+    countdown = 3; // 3-2-1 倒计时后再开始无敌计时
+    settingsOpen = false;
+    introT = 1.2; // 缓启动：重力减半
+    invT = 2;     // 2 秒无敌：保留管道，直接从障碍物中穿出
+    bird.y = H * 0.45;
+    bird.vy = CFG.flapVel * 0.7;
+    bird.wing = 0.35;
+    bird.squash = 0.22;
+    toast = { text: '复活！', t: 1.4 };
+    vibrate();
+    sfx('revive');
+  }
+
   // ---------- 结算界面按钮 ----------
   function overRects() {
-    var bw2 = 220 * U, bh2 = 52 * U;
+    var bw2 = 220 * U, bh2 = 48 * U, sp2 = 10 * U;
+    var top = H * 0.56;
+    function rowBtn(k, label) { return { x: W / 2 - bw2 / 2, y: top + k * (bh2 + sp2), w: bw2, h: bh2, label: label }; }
     return {
-      restart: { x: W / 2 - bw2 / 2, y: H * 0.6, w: bw2, h: bh2, label: '重新开始' },
-      home: { x: W / 2 - bw2 / 2, y: H * 0.6 + bh2 + 16 * U, w: bw2, h: bh2, label: '返回首页' }
+      revive: rowBtn(0, '复活 ' + revivePrice() + ' 金币'),
+      restart: rowBtn(1, '重新开始'),
+      home: rowBtn(2, '返回首页'),
+      share: rowBtn(3, '分享战绩')
     };
   }
 
@@ -328,6 +387,14 @@
     pipes = [];
     lines = [];
     confetti = [];
+    items = [];
+    shieldOn = false;
+    invT = 0;
+    revives = 0;
+    floats = [];
+    rainTimer = 20 + Math.random() * 20;
+    rainWarn = 0;
+    rainT = 0;
     score = 0;
     introT = 0;
     paused = false;
@@ -353,7 +420,25 @@
     var minC = CFG.gapMargin + gap / 2;
     var maxC = H - CFG.groundH - CFG.gapMargin - gap / 2;
     var gapY = minC + Math.random() * (maxC - minC);
-    pipes.push({ x: W + CFG.pipeW, gapY: gapY, gap: gap });
+    var x = W + CFG.pipeW;
+    pipes.push({ x: x, gapY: gapY, gap: gap });
+    // 道具：30% 金币（悬在本管与下一管之间、对齐缝隙高度），10% 护盾（未持有才出）
+    var roll = Math.random();
+    if (roll < 0.3) {
+      items.push({ type: 'coin', x: x + CFG.pipeW + CFG.pipeSpacing * 0.5, y: gapY, r: 11 * U, phase: Math.random() * Math.PI * 2 });
+    } else if (roll < 0.4 && !shieldOn) {
+      var sy = CFG.gapMargin + Math.random() * (H - CFG.groundH - CFG.gapMargin * 2);
+      items.push({ type: 'shield', x: x + CFG.pipeW + CFG.pipeSpacing * 0.5, y: sy, r: 13 * U, phase: Math.random() * Math.PI * 2 });
+    }
+  }
+
+  function useShield() {
+    shieldOn = false;
+    invT = 0.8;
+    bird.vy = CFG.flapVel * 0.6;
+    toast = { text: '护盾抵挡了一次！', t: 1.4 };
+    vibrate();
+    sfx('shield');
   }
 
   function flap() {
@@ -383,6 +468,79 @@
     }
   }
 
+  // ---------- 战绩分享图 ----------
+  function shareScore() {
+    var cw2 = 600, ch2 = 900;
+    var off = isTT ? tt.createCanvas() : document.createElement('canvas');
+    off.width = cw2;
+    off.height = ch2;
+    var octx = off.getContext('2d');
+    var g2 = octx.createLinearGradient(0, 0, 0, ch2);
+    g2.addColorStop(0, '#354b64');
+    g2.addColorStop(1, '#1c2a3c');
+    octx.fillStyle = g2;
+    octx.fillRect(0, 0, cw2, ch2);
+    octx.strokeStyle = '#ffd23e';
+    octx.lineWidth = 6;
+    octx.strokeRect(20, 20, cw2 - 40, ch2 - 40);
+    function txt(s, x, y, size, color) {
+      octx.font = 'bold ' + size + 'px sans-serif';
+      octx.textAlign = 'center';
+      octx.textBaseline = 'middle';
+      octx.fillStyle = color || '#ffffff';
+      octx.fillText(s, x, y);
+    }
+    txt('跳跳鸟', cw2 / 2, 130, 64, '#ffd23e');
+    txt('我的战绩', cw2 / 2, 210, 34, 'rgba(255,255,255,0.85)');
+    txt(String(score), cw2 / 2, 380, 150);
+    txt('最高分 ' + best, cw2 / 2, 500, 36, '#ffd23e');
+    txt(seasonMix().name + '季 · ' + DIFF_NAMES[diffLevel], cw2 / 2, 570, 30, 'rgba(255,255,255,0.8)');
+    var bx = cw2 / 2, by = 660, r2 = 46;
+    octx.fillStyle = SKINS[skinIdx].body;
+    octx.beginPath();
+    octx.arc(bx, by, r2, 0, Math.PI * 2);
+    octx.fill();
+    octx.fillStyle = SKINS[skinIdx].wing;
+    octx.beginPath();
+    octx.ellipse(bx - r2 * 0.25, by + r2 * 0.2, r2 * 0.55, r2 * 0.35, 0.4, 0, Math.PI * 2);
+    octx.fill();
+    octx.fillStyle = '#ffffff';
+    octx.beginPath();
+    octx.arc(bx + r2 * 0.45, by - r2 * 0.3, r2 * 0.28, 0, Math.PI * 2);
+    octx.fill();
+    octx.fillStyle = '#000000';
+    octx.beginPath();
+    octx.arc(bx + r2 * 0.55, by - r2 * 0.3, r2 * 0.12, 0, Math.PI * 2);
+    octx.fill();
+    octx.fillStyle = '#ff6b35';
+    octx.beginPath();
+    octx.moveTo(bx + r2 * 0.7, by);
+    octx.lineTo(bx + r2 * 1.4, by + r2 * 0.12);
+    octx.lineTo(bx + r2 * 0.7, by + r2 * 0.38);
+    octx.closePath();
+    octx.fill();
+    txt(new Date().toLocaleDateString('zh-CN'), cw2 / 2, 780, 28, 'rgba(255,255,255,0.75)');
+    txt('开源小游戏 · GitHub 搜索 tiaotiaoniao', cw2 / 2, 832, 24, 'rgba(255,255,255,0.55)');
+    if (isTT) {
+      try {
+        off.toTempFilePath({
+          success: function (res) { tt.shareAppMessage({ imageUrl: res.tempFilePath }); }
+        });
+      } catch (e) {}
+    } else {
+      try {
+        var a = document.createElement('a');
+        a.download = '跳跳鸟战绩_' + score + '分.png';
+        a.href = off.toDataURL('image/png');
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        toast = { text: '战绩图已保存', t: 1.4 };
+        sfx('milestone');
+      } catch (e) {}
+    }
+  }
+
   function circleRectHit(cx, cy, r, rx, ry, rw, rh) {
     var nx = Math.max(rx, Math.min(cx, rx + rw));
     var ny = Math.max(ry, Math.min(cy, ry + rh));
@@ -408,6 +566,7 @@
     }
     bird.wing = Math.max(0, bird.wing - dt);
     bird.squash = Math.max(0, bird.squash - dt);
+    invT = Math.max(0, invT - dt);
     toast.t = Math.max(0, toast.t - dt);
     for (var s = lines.length - 1; s >= 0; s--) {
       var l = lines[s];
@@ -464,6 +623,50 @@
       g = CFG.gravity * 0.4; // 缓启动：重力减半，防止重开后急坠
     }
 
+    // 金币雨：预告 → 5 秒无敌+金币涌来 → 结束保护
+    if (rainT > 0) {
+      rainT -= dt;
+      invT = Math.max(invT, rainT); // 金币雨期间持续无敌
+      rainSpawn -= dt;
+      if (rainSpawn <= 0) {
+        rainSpawn = 0.15;
+        items.push({
+          type: 'coin',
+          x: W + 20 * U,
+          y: CFG.gapMargin + Math.random() * (H - CFG.groundH - CFG.gapMargin * 2),
+          r: 11 * U,
+          phase: Math.random() * Math.PI * 2
+        });
+      }
+      if (rainT <= 0) {
+        rainT = 0;
+        invT = 1.5; // 结束保护，给玩家时间调整位置
+        toast = { text: '金币雨结束', t: 1.2 };
+        rainTimer = 40 + Math.random() * 40;
+      } else if (rainT <= 1.2 && !rainEndWarned) {
+        rainEndWarned = true;
+        toast = { text: '金币雨要结束了！', t: 1.1 };
+      }
+    } else if (rainWarn > 0) {
+      rainWarn -= dt;
+      if (rainWarn <= 0) {
+        rainWarn = 0;
+        rainT = 5;
+        rainSpawn = 0;
+        rainEndWarned = false;
+        toast = { text: '金币雨！', t: 1.6 };
+        sfx('rain');
+        vibrate();
+      }
+    } else if (introT <= 0 && score >= 5) {
+      rainTimer -= dt;
+      if (rainTimer <= 0) {
+        rainWarn = 2;
+        toast = { text: '金币雨即将来临！', t: 2 };
+        sfx('milestone');
+      }
+    }
+
     bird.vy += g * dt;
     bird.y += bird.vy * dt;
 
@@ -480,6 +683,34 @@
 
     for (var i = 0; i < pipes.length; i++) {
       pipes[i].x -= diff.speed * dt;
+    }
+    // 飘字上浮衰减
+    for (var ft = floats.length - 1; ft >= 0; ft--) {
+      var fo = floats[ft];
+      fo.t -= dt;
+      fo.y -= 45 * U * dt;
+      if (fo.t <= 0) floats.splice(ft, 1);
+    }
+    // 道具左移与拾取判定
+    for (var m = items.length - 1; m >= 0; m--) {
+      var it = items[m];
+      it.x -= diff.speed * dt;
+      if (it.x < -30 * U) { items.splice(m, 1); continue; }
+      var ddx = it.x - CFG.birdX, ddy = it.y - bird.y;
+      var rr2 = it.r + CFG.birdR;
+      if (ddx * ddx + ddy * ddy < rr2 * rr2) {
+        items.splice(m, 1);
+        if (it.type === 'coin') {
+          coins++;
+          saveVal('ttn_coins', coins);
+          floats.push({ x: it.x, y: it.y, t: 0.8, text: '+1', color: '#ffd23e' });
+          sfx('coin');
+        } else {
+          shieldOn = true;
+          toast = { text: '获得护盾！', t: 1.4 };
+          sfx('milestone');
+        }
+      }
     }
     // 移除越界管道
     if (pipes.length && pipes[0].x < -CFG.pipeW) pipes.shift();
@@ -518,11 +749,14 @@
     // 碰撞判定
     if (bird.y + CFG.birdR >= H - CFG.groundH) {
       bird.y = H - CFG.groundH - CFG.birdR;
-      die();
-      return;
+      if (invT > 0) { bird.vy = 0; } // 无敌期间贴地滑行
+      else if (shieldOn) { useShield(); }
+      else { die(); return; }
     }
     for (var k = 0; k < pipes.length; k++) {
       if (birdBoxHit(pipes[k])) {
+        if (invT > 0) continue; // 无敌期间穿越
+        if (shieldOn) { useShield(); continue; }
         die();
         return;
       }
@@ -549,13 +783,14 @@
     ctx.save();
     ctx.translate(CFG.birdX, bird.y);
     ctx.scale(1, sy);
+    var skin = SKINS[skinIdx];
     // 身体
-    ctx.fillStyle = COLOR.bird;
+    ctx.fillStyle = skin.body;
     ctx.beginPath();
     ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.fill();
     // 翅膀
-    ctx.fillStyle = COLOR.birdWing;
+    ctx.fillStyle = skin.wing;
     ctx.beginPath();
     ctx.ellipse(-r * 0.25, r * 0.2 + wingA * r * 0.55, r * 0.55, r * 0.35, wingA * 0.9, 0, Math.PI * 2);
     ctx.fill();
@@ -590,6 +825,62 @@
       ctx.moveTo(l.x, l.y);
       ctx.lineTo(l.x - l.vx * 0.06, l.y - l.vy * 0.06);
       ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawItems() {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var bob = Math.sin(Date.now() / 300 + it.phase) * 5 * U;
+      if (it.type === 'coin') {
+        ctx.fillStyle = '#ffd23e';
+        ctx.beginPath();
+        ctx.arc(it.x, it.y + bob, it.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = '#e0a800';
+        ctx.lineWidth = 2.5 * U;
+        ctx.beginPath();
+        ctx.arc(it.x, it.y + bob, it.r * 0.6, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(78, 205, 196, 0.3)';
+        ctx.beginPath();
+        ctx.arc(it.x, it.y + bob, it.r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(78, 205, 196, 0.95)';
+        ctx.lineWidth = 3 * U;
+        ctx.beginPath();
+        ctx.arc(it.x, it.y + bob, it.r, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+        ctx.lineWidth = 2 * U;
+        ctx.beginPath();
+        ctx.arc(it.x, it.y + bob, it.r * 0.55, -Math.PI * 0.9, -Math.PI * 0.4);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawShieldBubble() {
+    if (invT > 0 && Math.floor(invT * 10) % 2 === 0) return; // 抵挡瞬间闪烁
+    if (!shieldOn && invT <= 0) return;
+    ctx.strokeStyle = 'rgba(78, 205, 196, 0.8)';
+    ctx.lineWidth = 2.5 * U;
+    ctx.beginPath();
+    ctx.arc(CFG.birdX, bird.y, CFG.birdR + 9 * U, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(78, 205, 196, 0.12)';
+    ctx.fill();
+  }
+
+  function drawFloats() {
+    for (var i = 0; i < floats.length; i++) {
+      var fo = floats[i];
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, fo.t / 0.4);
+      drawText(fo.text, fo.x, fo.y, 16 * U, 'center', fo.color);
+      ctx.restore();
     }
     ctx.globalAlpha = 1;
   }
@@ -690,7 +981,7 @@
   function settingsRects() {
     var pw = W * 0.82, px = (W - pw) / 2;
     var rh = 44 * U, gap = 16 * U, head = 56 * U;
-    var ph = head + 6 * rh + 5 * gap + 14 * U;
+    var ph = head + 7 * rh + 6 * gap + 14 * U;
     // 屏幕过矮时整体收缩，保证面板不出屏
     if (ph > H - 24 * U) {
       var f = (H - 24 * U) / ph;
@@ -715,8 +1006,16 @@
       volPlus: rct(cx + cw - 50 * U, row(2), 50 * U, rh, '＋'),
       volBar: rct(cx + 60 * U, row(2) + 10 * U, cw - 120 * U, rh - 20 * U, ''),
       vib: rct(cx, row(3), 100 * U, rh, vibrationOn ? '开' : '关'),
-      restart: rct(cx, row(4), cw, rh, '重新开始'),
-      close: rct(cx, row(5), cw, rh, state === STATE_PLAYING ? '继续游戏' : '关 闭')
+      skin: (function () {
+        var n = SKINS.length;
+        var sg = 6 * U;
+        var sw = (cw - (n - 1) * sg) / n;
+        var arr = [];
+        for (var i = 0; i < n; i++) arr.push(rct(cx + i * (sw + sg), row(4), sw, rh, SKINS[i].name));
+        return arr;
+      })(),
+      restart: rct(cx, row(5), cw, rh, '重新开始'),
+      close: rct(cx, row(6), cw, rh, state === STATE_PLAYING ? '继续游戏' : '关 闭')
     };
   }
 
@@ -826,6 +1125,17 @@
     // 震动
     drawText('震动', r.px + 16 * U, r.vib.y + r.rh / 2, 15 * U, 'left');
     drawBtn(r.vib, vibrationOn);
+    // 皮肤（未解锁的置灰）
+    drawText('皮肤', r.px + 16 * U, r.skin[0].y + r.rh / 2, 15 * U, 'left');
+    for (var s = 0; s < r.skin.length; s++) {
+      drawBtn(r.skin[s], s === skinIdx);
+      if (!skinUnlocked(s)) {
+        ctx.fillStyle = 'rgba(0,0,0,0.45)';
+        rr(r.skin[s].x, r.skin[s].y, r.skin[s].w, r.skin[s].h, 8 * U);
+        ctx.fill();
+        drawText(String(SKINS[s].need) + '分', r.skin[s].x + r.skin[s].w / 2, r.skin[s].y + r.rh / 2, 12 * U, 'center', 'rgba(255,255,255,0.9)');
+      }
+    }
     // 操作
     drawBtn(r.restart, false);
     drawBtn(r.close, false);
@@ -847,6 +1157,17 @@
     if (hit(r.volMinus)) { volume = Math.max(0, Math.round((volume - 0.1) * 10) / 10); applyVolume(); saveVal('ttn_vol', volume); return; }
     if (hit(r.volPlus)) { volume = Math.min(1, Math.round((volume + 0.1) * 10) / 10); applyVolume(); saveVal('ttn_vol', volume); return; }
     if (hit(r.vib)) { vibrationOn = !vibrationOn; saveVal('ttn_vib', vibrationOn ? '1' : '0'); if (vibrationOn) vibrate(); return; }
+    for (var i = 0; i < r.skin.length; i++) {
+      if (hit(r.skin[i])) {
+        if (skinUnlocked(i)) {
+          if (skinIdx !== i) { skinIdx = i; saveVal('ttn_skin', i); sfx('score'); }
+        } else {
+          toast = { text: '最高分达到 ' + SKINS[i].need + ' 分解锁', t: 1.4 };
+          sfx('score');
+        }
+        return;
+      }
+    }
     if (hit(r.restart)) { resetGame(); return; }
     if (hit(r.close)) {
       settingsOpen = false;
@@ -876,8 +1197,11 @@
     drawPipes();
     drawGround(scrollOff);
     drawFlakes();
+    drawItems();
+    drawFloats();
     drawLines();
     drawBird();
+    drawShieldBubble();
     drawConfetti();
 
     if (state === STATE_READY) {
@@ -892,6 +1216,24 @@
       drawText('穿过管道 +1 分', W / 2, H * 0.33, 17 * U, 'center', 'rgba(255,255,255,0.85)');
       drawText('点击开始', W / 2, H * 0.62, 24 * U);
       if (best > 0) drawText('最高分 ' + best, W / 2, H * 0.7, 18 * U, 'center', '#ffd23e');
+      // 金币累计（图标 + 数量）
+      var coinTxt = String(coins);
+      var csz = 17 * U;
+      ctx.font = 'bold ' + Math.round(csz) + 'px sans-serif';
+      var cw3 = ctx.measureText(coinTxt).width;
+      var total3 = 18 * U + 6 * U + cw3;
+      var left3 = W / 2 - total3 / 2;
+      var icy = H * 0.752;
+      ctx.fillStyle = '#ffd23e';
+      ctx.beginPath();
+      ctx.arc(left3 + 9 * U, icy, 9 * U, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#e0a800';
+      ctx.lineWidth = 2 * U;
+      ctx.beginPath();
+      ctx.arc(left3 + 9 * U, icy, 5.5 * U, 0, Math.PI * 2);
+      ctx.stroke();
+      drawText(coinTxt, left3 + 24 * U + cw3 / 2, icy, 17 * U, 'center', '#ffd23e');
     } else if (state === STATE_PLAYING) {
       drawText(String(score), W / 2, H * 0.12, 52 * U);
       // 右上角最高分；超越后变为新纪录提示
@@ -900,6 +1242,24 @@
       } else if (best > 0) {
         drawText('最高分 ' + best, W - 14 * U, safeTop + 26 * U, 16 * U, 'right', 'rgba(255,255,255,0.9)');
       }
+      // 最高分正下方：金币图标 + 数量
+      var coinTxt2 = String(coins);
+      var csz2 = 16 * U;
+      ctx.font = 'bold ' + Math.round(csz2) + 'px sans-serif';
+      var cw4 = ctx.measureText(coinTxt2).width;
+      var ir2 = 8 * U;
+      var icx2 = W - 14 * U - cw4 - 6 * U - ir2;
+      var icy2 = safeTop + 52 * U;
+      ctx.fillStyle = '#ffd23e';
+      ctx.beginPath();
+      ctx.arc(icx2, icy2, ir2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = '#e0a800';
+      ctx.lineWidth = 2 * U;
+      ctx.beginPath();
+      ctx.arc(icx2, icy2, ir2 * 0.6, 0, Math.PI * 2);
+      ctx.stroke();
+      drawText(coinTxt2, W - 14 * U, icy2, 16 * U, 'right', '#ffd23e');
       if (countdown > 0) {
         // 恢复倒计时：3、2、1 逐秒缩小
         ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -955,11 +1315,20 @@
       ctx.fillStyle = COLOR.panel;
       ctx.fillRect(0, 0, W, H);
       drawText('游戏结束', W / 2, H * 0.3, 38 * U);
-      drawText('得分 ' + score, W / 2, H * 0.42, 26 * U);
-      drawText(score >= best && score > 0 ? '新纪录!' : '最高分 ' + best, W / 2, H * 0.5, 20 * U, 'center', '#ffd23e');
+      drawText('得分 ' + score, W / 2, H * 0.4, 26 * U);
+      drawText(score >= best && score > 0 ? '新纪录!' : '最高分 ' + best, W / 2, H * 0.465, 20 * U, 'center', '#ffd23e');
+      drawText('金币 ' + coins, W / 2, H * 0.525, 17 * U, 'center', 'rgba(255,255,255,0.9)');
       var orr = overRects();
+      var canRevive = coins >= revivePrice();
+      drawBtn(orr.revive, canRevive);
+      if (!canRevive) {
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        rr(orr.revive.x, orr.revive.y, orr.revive.w, orr.revive.h, 8 * U);
+        ctx.fill();
+      }
       drawBtn(orr.restart, false);
       drawBtn(orr.home, false);
+      drawBtn(orr.share, false);
     }
     if (settingsOpen) drawSettings();
   }
@@ -986,9 +1355,21 @@
       handleSettingsTap(x, y);
       return;
     }
-    // 结算界面：返回首页按钮（重新开始仍可点屏幕任意处）
+    // 结算界面：复活 / 返回首页 / 分享战绩按钮（重新开始仍可点屏幕任意处）
     if (state === STATE_OVER && Date.now() - overAt > 500) {
-      var orh = overRects().home;
+      var orc = overRects();
+      var orv = orc.revive;
+      if (x >= orv.x && x <= orv.x + orv.w && y >= orv.y && y <= orv.y + orv.h) {
+        if (coins >= revivePrice()) revive();
+        else { toast = { text: '金币不足', t: 1.2 }; sfx('score'); }
+        return;
+      }
+      var osh = orc.share;
+      if (x >= osh.x && x <= osh.x + osh.w && y >= osh.y && y <= osh.y + osh.h) {
+        shareScore();
+        return;
+      }
+      var orh = orc.home;
       if (x >= orh.x && x <= orh.x + orh.w && y >= orh.y && y <= orh.y + orh.h) {
         goHome();
         return;
@@ -1041,7 +1422,7 @@
       get: function () {
         var info = [];
         for (var i = 0; i < pipes.length; i++) info.push({ x: Math.round(pipes[i].x), gapY: Math.round(pipes[i].gapY), gap: Math.round(pipes[i].gap) });
-        return { state: state, score: score, seasonProg: +seasonProg().toFixed(3), best: best, safeTop: safeTop, birdY: Math.round(bird.y), vy: Math.round(bird.vy), pipes: pipes.length, pipesInfo: info, toast: toast.text, toastT: +toast.t.toFixed(2), lines: lines.length, squash: +bird.squash.toFixed(2), season: seasonMix().name, flakes: flakes.length, introT: +introT.toFixed(2), paused: paused, beatBest: beatBest, confetti: confetti.length, settingsOpen: settingsOpen, countdown: +countdown.toFixed(2), diff: DIFF_NAMES[diffLevel], sfxOn: sfxOn, vibrationOn: vibrationOn, volume: volume };
+        return { state: state, score: score, seasonProg: +seasonProg().toFixed(3), best: best, safeTop: safeTop, birdY: Math.round(bird.y), vy: Math.round(bird.vy), pipes: pipes.length, pipesInfo: info, toast: toast.text, toastT: +toast.t.toFixed(2), lines: lines.length, squash: +bird.squash.toFixed(2), season: seasonMix().name, flakes: flakes.length, introT: +introT.toFixed(2), paused: paused, beatBest: beatBest, confetti: confetti.length, settingsOpen: settingsOpen, countdown: +countdown.toFixed(2), diff: DIFF_NAMES[diffLevel], sfxOn: sfxOn, vibrationOn: vibrationOn, volume: volume, items: items.length, shieldOn: shieldOn, invT: +invT.toFixed(2), skinIdx: skinIdx, skin: SKINS[skinIdx].name, coins: coins, revives: revives, floats: floats.length, rainT: +rainT.toFixed(2), rainWarn: +rainWarn.toFixed(2) };
       },
       flap: flap,
       onTap: onTap,
@@ -1050,6 +1431,8 @@
       forceToast: function (text) { toast = { text: text, t: 1.4 }; },
       confetti: spawnConfetti,
       reset: resetGame,
+      revive: revive,
+      share: shareScore,
       die: die,
       CFG: CFG
     };
